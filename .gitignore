@@ -18,6 +18,8 @@ NOTE.md
 # !datasets/
 datasets/*
 !datasets/partimagenet_preprocess.py
+!datasets/paco_tabletop_preprocess.py
+!datasets/paco_download.sh
 
 # output
 output/*
@@ -48,6 +50,7 @@ configs/zero_shot/*
 !configs/zero_shot/partcatseg_ade.yaml
 !configs/zero_shot/partcatseg_partimagenet.yaml
 !configs/zero_shot/partcatseg_partimagenet_ood.yaml
+!configs/zero_shot/partcatseg_paco_tabletop.yaml
 
 # debug
 debug/

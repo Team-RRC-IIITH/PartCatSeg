@@ -283,6 +283,154 @@ Please note that the performance on `PartImageNet_OOD` should be evaluated by th
 
 <br/>
 
+---
+
+## This fork: tabletop parts (PACO) and GraspClutter6D
+
+This fork adds training on **PACO-LVIS restricted to 39 tabletop objects / 197 object-part classes**
+(bottle, box, can, cup, mug, jar, bowl, plate, knife, scissors, drill, ...), and per-object part
+segmentation of **GraspClutter6D** scenes using either its ground-truth masks or SAM 3 masks.
+
+### Environment (pixi)
+
+This fork uses [pixi](https://pixi.sh) instead of the conda/pip steps above. The env is locked in
+`pixi.toml` / `pixi.lock` (torch 2.2.2 + CUDA 12.1, detectron2 built against it).
+
+```sh
+source ./pixi_setup.sh      # keeps pixi's caches inside the repo; source it before every pixi command
+pixi install
+pixi run fetch-dinov2       # once: pins DINOv2's torch.hub code to the release-era commit
+```
+
+- Set `DETECTRON2_DATASETS` in `pixi.toml` (`[activation.env]`) to your datasets root.
+- Don't `pip install` into this env. Add packages with `pixi add` / `pixi add --pypi`; a PyPI
+  torch would break detectron2's compiled extension.
+- `fetch-dinov2` is required because DINOv2's current `main` needs Python >= 3.10.
+
+### Train on PACO tabletop
+
+**1. Download PACO.** This fetches the annotations and only the ~57.6k COCO images PACO uses
+(~9 GB), not the full COCO zips. It is resumable: re-run it until it prints `ALL DONE`.
+
+```sh
+bash datasets/paco_download.sh $DETECTRON2_DATASETS
+```
+
+**2. Convert** to PartCATSeg's object-part format (~30 s, CPU). This writes
+`$DETECTRON2_DATASETS/PACO_tabletop/`. The tabletop object list is the `TABLETOP` dict in the
+script; to change it, edit the dict and re-run.
+
+```sh
+pixi run python datasets/paco_tabletop_preprocess.py \
+    --paco-ann  $DETECTRON2_DATASETS/PACO/annotations \
+    --coco-root $DETECTRON2_DATASETS/coco \
+    --out       $DETECTRON2_DATASETS/PACO_tabletop
+```
+
+The output contains absolute paths, so re-run the conversion if you move the data.
+
+**3. Train and test.** Training fine-tunes from `weights/partcatseg_ade.pth` (download it as
+described in [Pre-trained Weights](#pre-trained-weights)) and evaluates on PACO val every 1k
+iterations. `model_final.pth` is then scored on PACO test.
+
+```sh
+bash train_paco.sh                                                        # full run: 20k iterations
+OUT=output/paco_smoke bash train_paco.sh SOLVER.MAX_ITER 20 TEST.EVAL_PERIOD 0   # smoke test
+```
+
+| | |
+|---|---|
+| config | `configs/zero_shot/partcatseg_paco_tabletop.yaml` |
+| output | `output/partcatseg_paco_tabletop/` (checkpoint every 1k iterations; `log.txt`, `metrics.json`) |
+| batch | 1 image x 4 gradient-accumulation steps (`SOLVER.ACCUM_STEPS`), equal to the paper's 4 GPUs x 1 image |
+| cost on one RTX 4090 | 16 GB peak, ~1.2 s/step, **~7 h for 20k steps**, plus ~11 min per val pass |
+
+- **Resuming:** re-running `train_paco.sh` resumes from `$OUT/last_checkpoint`.
+- **Overrides:** trailing `KEY VALUE` pairs are detectron2 config overrides.
+- **Shared GPU:** the script refuses to start while another process holds the GPU; `FORCE=1`
+  overrides this.
+- **Progress:** follow `tail -f output/partcatseg_paco_tabletop/log.txt`. Training is done when
+  `model_final.pth` exists and the PACO test result is printed.
+- **Metric:** every class is trained on (there is no zero-shot split), so read `mIoU-base`.
+
+### Part segmentation on GraspClutter6D
+
+PartCATSeg was trained and evaluated **conditioned on a given object mask**, so it never learned
+object boundaries or background. Run on a whole image, it labels almost every pixel, including
+the table. Run it **per object** instead: give it one mask per object, and it labels only the
+pixels inside each mask.
+
+**Recommended: `run_part_seg.sh`.** Edit the block at the top of the script, then run
+`bash run_part_seg.sh`.
+
+```bash
+MODE=both                                    # gt | sam3 | both
+SCENE_DIR=/path/to/GraspClutter6D-2/scenes/000000
+FRAME=000001
+IMAGE=$SCENE_DIR/rgb/$FRAME.png              # any image works for sam3
+GT_MASKS="$SCENE_DIR/mask_visib/${FRAME}_*.png"
+WEIGHTS=output/partcatseg_paco_tabletop/model_final.pth
+SAM3_PROMPT=item                             # a concrete singular noun ("objects" finds nothing)
+EXTRA_ARGS=()                                # e.g. (--min-score 0.1 --crop-margin 0.25)
+SOM_PYTHON=/path/to/env-with-sam3/bin/python
+HF_CACHE=/path/to/huggingface/cache          # must contain facebook/sam3
+```
+
+The two mask sources:
+
+- **`gt`** uses GraspClutter6D's visible-object masks (`mask_visib/<frame>_*.png`).
+- **`sam3`** first detects objects with SAM 3 (`export_sam3_masks.py`), then segments parts inside
+  them. This works on any image, not just GraspClutter6D.
+  - SAM 3 needs `transformers>=5`, which this env cannot have, so it runs with a separate python
+    (`SOM_PYTHON`).
+  - The weights (`facebook/sam3`) are gated on Hugging Face: request access, then download them
+    once into `HF_CACHE`.
+  - Masks under 2000 px, or larger than 15 % of the image (the tote), are dropped.
+
+Results go to `results/<scene>/`:
+
+| file | content |
+|---|---|
+| `<frame>_paco_<masks>_parts.png` | overlay with part names |
+| `<frame>_paco_<masks>_objects.png` | predicted object class per mask |
+| `<frame>_paco_<masks>_labels.png` | uint16 part label map; 65535 = no part |
+| `<frame>_paco_<masks>_parts.json` | classes, object scores and top-3 per mask |
+| `<frame>_<masks>_comparison.png` | input next to the result |
+| `sam3_masks/<frame>_sam3_*.png` | the SAM 3 masks (sam3 mode) |
+
+`<masks>` is `mask_visib` (GT) or `sam3_masks`. A frame with 16 objects takes ~15 s once the
+weights are cached.
+
+**Calling `infer_image.py` directly:**
+
+```sh
+S=/path/to/GraspClutter6D-2/scenes/000000
+
+# per object, GT masks (recommended)
+pixi run python infer_image.py $S/rgb/000001.png --obj-masks $S/mask_visib/000001_*.png
+
+# whole image, dropping weak labels (fast, but boundaries are coarse and the table gets labels)
+pixi run python infer_image.py $S/rgb/000001.png --min-score 0.05
+
+# another checkpoint, or a zero-shot vocabulary of "<object>'s <part>" names
+pixi run python infer_image.py <img> --weights output/partcatseg_paco_tabletop/model_0009999.pth
+pixi run python infer_image.py <img> --vocab "mug's handle" "mug's body" "kettle's spout"
+```
+
+Per-object mode crops a square around each mask (`--crop-margin`, default 0.15) and resizes it to
+384² (`--crop-size`, the training crop size). It then picks the object class the model scores
+highest inside the mask and keeps only that object's parts.
+
+**Known limitation: the object class is the weak point, not the masks or the parts.**
+
+- Object scores are often only 0.06–0.2. Some boxes come out as book, carton or mug, and two
+  instances of the same object can get different classes.
+- Near-ties can flip between runs: one GT mask scored "box" and "cup" both at 0.08 and changed
+  class between runs.
+- `--objects mug bottle ...` restricts the choice to the objects you list.
+
+<br/>
+
 ### Project Structure
 
 <!--

@@ -5,7 +5,7 @@
     pixi run python infer_image.py <img> --weights output/.../model_0009999.pth       # any checkpoint
     pixi run python infer_image.py <img> --vocab "mug's handle" "mug's body" "lid's knob"   # zero-shot
     pixi run python infer_image.py <img> --vocab-file my_parts.txt                    # one per line
-    pixi run python infer_image.py /scratch2/GraspClutter6D-2/scenes/000000 --models voc ade
+    pixi run python infer_image.py /path/to/GraspClutter6D-2/scenes/000000 --models voc ade
     pixi run python infer_image.py <img> --objects mug bottle                         # restrict vocab
     pixi run python infer_image.py <img> --min-score 0.05                             # drop weak labels
     pixi run python infer_image.py $S/rgb/000001.png --obj-masks $S/mask_visib/000001_*.png   # per object
